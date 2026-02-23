@@ -1,4 +1,4 @@
-# tango-saphana
+# tango-hart
 
 scadawire/tango-controls integration to Hart devices
 
