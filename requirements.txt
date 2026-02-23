@@ -1,0 +1,2 @@
+pytango==9.3.2
+hart-protocol==2023.6.0
