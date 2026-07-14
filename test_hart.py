@@ -40,10 +40,12 @@ class State:
         self.timeout = 0.5
         self.poll_interval = 1.0
 
-    def info_stream(self, msg): pass
-    def debug_stream(self, msg): pass
-    def warn_stream(self, msg): pass
-    def error_stream(self, msg): pass
+    # mirror pytango: the message is rendered as `msg % args`, so a format
+    # mismatch (a stray % in the payload) raises here just as it would live
+    def info_stream(self, msg, *args): msg % args
+    def debug_stream(self, msg, *args): msg % args
+    def warn_stream(self, msg, *args): msg % args
+    def error_stream(self, msg, *args): msg % args
     def get_state(self): return None
 
     def __getattr__(self, name):

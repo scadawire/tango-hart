@@ -101,10 +101,10 @@ class Hart(Device, metaclass=DeviceMeta):
                 bytesize=8,
                 timeout=self.timeout,
             )
-            self.info_stream("Connected to HART device on " + self.serial_port)
+            self.info_stream("Connected to HART device on %s", self.serial_port)
         except Exception as e:
             self.last_error = str(e)
-            self.error_stream(traceback.format_exc())
+            self.error_stream("%s", traceback.format_exc())
             self.set_state(DevState.FAULT)
 
     # ───────────── Poll Loop ─────────────
@@ -113,7 +113,7 @@ class Hart(Device, metaclass=DeviceMeta):
             try:
                 self._run_poll()
             except Exception as e:
-                self.warn_stream("poll error: " + str(e))
+                self.warn_stream("poll error: %s", str(e))
             self._stop_event.wait(timeout=self.poll_interval)
 
     def _run_poll(self):
@@ -239,7 +239,7 @@ class Hart(Device, metaclass=DeviceMeta):
 
         data = self._build_write_data(cmd_id, lookup["field_name"], value, var_type)
         if data is None:
-            self.warn_stream("write not supported for HART command " + str(cmd_id))
+            self.warn_stream("write not supported for HART command %s", cmd_id)
             return
 
         response = self._send_command(self.address, cmd_id, data)
