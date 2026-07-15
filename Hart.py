@@ -223,6 +223,7 @@ class Hart(Device, metaclass=DeviceMeta):
         }
         self.dynamicAttributes[name] = self._default_value(var_type)
         self.add_attribute(attr, r_meth=self.read_dynamic_attr, w_meth=self.write_dynamic_attr)
+        self.set_change_event(name, True, False)
 
     # ───────────── Attribute Access ─────────────
     def read_dynamic_attr(self, attr):
@@ -249,6 +250,7 @@ class Hart(Device, metaclass=DeviceMeta):
                 self.dynamicAttributes[name] = self._cast_value(
                     getattr(response, field), var_type
                 )
+                self.push_change_event(name, self.dynamicAttributes[name])
 
     def _build_write_data(self, cmd_id, field_name, value, var_type):
         """Return packed data bytes for a write command, or None if unsupported."""
