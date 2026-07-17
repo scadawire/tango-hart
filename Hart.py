@@ -7,7 +7,7 @@ import time
 import struct
 import traceback
 import threading
-from tango import AttrWriteType, AttrDataFormat, DevState, Attr, SpectrumAttr, ImageAttr, CmdArgType, UserDefaultAttrProp
+from tango import AttrWriteType, AttrDataFormat, DevState, Attr, SpectrumAttr, ImageAttr, CmdArgType, UserDefaultAttrProp, EnsureOmniThread
 from tango.server import Device, attribute, command, DeviceMeta, device_property, run
 # hart_protocol is imported lazily inside connect() so the module can be loaded
 # (and tested) without the library installed.
@@ -44,6 +44,7 @@ class Hart(Device, metaclass=DeviceMeta):
     address     = device_property(dtype=int,   default_value=0)
     poll_interval = device_property(dtype=float, default_value=1.0)
     timeout     = device_property(dtype=float,  default_value=0.5)
+    health_check_interval = device_property(dtype=float, default_value=2.0)
     init_dynamic_attributes = device_property(dtype=str, default_value="")
 
     # ───────────── Lifecycle ─────────────
@@ -54,6 +55,7 @@ class Hart(Device, metaclass=DeviceMeta):
         self.dynamicAttributeLookup = {}
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._health_stop = None
         self._serial = None
         self.last_error = ""
 
@@ -84,10 +86,52 @@ class Hart(Device, metaclass=DeviceMeta):
         self._poll_thread.start()
         if self.get_state() != DevState.FAULT:
             self.set_state(DevState.ON)
+        self.start_health_monitor()
 
     def delete_device(self):
         if hasattr(self, "_stop_event"):
             self._stop_event.set()
+        if getattr(self, "_health_stop", None) is not None:
+            self._health_stop.set()
+
+    # ───────────── Health Monitor ─────────────
+    # A HART device is polled, never subscribed to, and the poll loop swallows what it cannot read -
+    # a device that stopped answering would leave every attribute at its last value with the driver
+    # still in ON. So the device is watched actively.
+    #
+    # The probe is command 0, read_unique_identifier: it is universal, so it works whatever the
+    # attributes happen to map, and it is what a master identifies a device with in the first place.
+    # Nothing has to be reopened on recovery - the serial port belongs to the line, not to the device
+    # at the far end of it, so the driver returns to ON as soon as the device answers again.
+    def health_probe(self):
+        if self._serial is None:
+            raise Exception("the serial line is not open")
+        if self._send_command(self.address, 0) is None:
+            raise Exception("no answer to command 0 from device " + str(self.address))
+
+    def _health_loop(self):
+        with EnsureOmniThread():
+            healthy = True
+            while not self._health_stop.is_set():
+                self._health_stop.wait(self.health_check_interval)
+                if self._health_stop.is_set():
+                    break
+                try:
+                    self.health_probe()
+                    if not healthy:
+                        self.info_stream("HART device %s answers again", self.address)
+                        self.set_state(DevState.ON)
+                        healthy = True
+                except Exception as e:
+                    if healthy:
+                        self.warn_stream("lost the HART device %s: %s", self.address, str(e))
+                        self.set_state(DevState.FAULT)
+                        healthy = False
+
+    def start_health_monitor(self):
+        self._health_stop = threading.Event()
+        self._health_thread = threading.Thread(target=self._health_loop, daemon=True)
+        self._health_thread.start()
 
     # ───────────── Connection ─────────────
     def connect(self):
