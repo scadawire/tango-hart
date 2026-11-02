@@ -732,6 +732,102 @@ def test_multi_poll():
 # Main
 # ===========================================================================
 
+
+# ---------------------------------------------------------------------------
+# Device scan
+# ---------------------------------------------------------------------------
+
+class ScanLine(MockSerial):
+    """A line with field devices on it: each answers command 0 sent as a short frame to its polling
+    address, and nothing else - a long frame or another address gets silence, as on a real loop."""
+    def __init__(self, devices):
+        super().__init__()
+        self.devices = devices  # polling address -> (manufacturer_id, device_type, device_id)
+        self.closed = False
+
+    def write(self, data):
+        self.written.append(data)
+        frame = data.lstrip(b"\xFF")
+        if len(frame) < 5 or frame[0] != 0x02 or frame[2] != 0:
+            return
+        checksum = 0
+        for b in frame[:4]:
+            checksum ^= b
+        if frame[4] != checksum or not frame[1] & 0x80:
+            return
+        address = frame[1] & 0x3F
+        if address in self.devices:
+            manufacturer, device_type, device_id = self.devices[address]
+            # a device echoes the address byte, master bit included
+            self._buf = make_cmd0_response(0x80 | address, manufacturer, device_type, device_id)
+
+    def reset_input_buffer(self):
+        self._buf = b""
+
+    def close(self):
+        self.closed = True
+
+
+def test_scan():
+    import Hart as module
+    section("scan")
+    line = ScanLine({0: (0x26, 0x0B, 0x00ABCDEF), 3: (0x11, 0x01, 12345)})
+    result = module.scan({"serial_port": "/dev/ttyUSB3", "max_address": 5, "timeout": 0.05}, line=line)
+    devices = result["devices"]
+    check("scan: polls every address up to max_address", len(line.written), 6)
+    check("scan: command 0 as a short frame to polling address 3",
+        line.written[3], bytes.fromhex("ffffffffff") + bytes([0x02, 0x83, 0x00, 0x00, 0x02 ^ 0x83]))
+    check("scan: one device per answering address", [d["details"]["polling_address"] for d in devices], [0, 3])
+    check("scan: properties", devices[1]["properties"],
+        {"serial_port": "/dev/ttyUSB3", "baudrate": 1200, "parity": "O", "address": 3})
+    check("scan: manufacturer", devices[1]["details"]["manufacturer_id"], "0x11")
+    check("scan: device type", devices[1]["details"]["device_type"], "0x01")
+    check("scan: device id", devices[1]["details"]["device_id"], 12345)
+    check("scan: long address as the library builds it", devices[1]["details"]["long_address"],
+        _ht.calculate_long_address(0x11, 0x01, (12345).to_bytes(3, "big")).hex())
+    check("scan: name", devices[0]["name"], "HART device 0 (manufacturer 0x26, type 0x0b) on /dev/ttyUSB3")
+    check("scan: shared line noted", len(devices[0]["notes"]), 1)
+    check("scan: a passed in line is not closed", line.closed, False)
+
+    lone = module.scan({"max_address": "", "timeout": 0.01}, line=ScanLine({7: (1, 2, 3)}))
+    check("scan: default max_address is 15 (HART 5)", [d["details"]["polling_address"] for d in lone["devices"]], [7])
+    check("scan: a lone device has no note", lone["devices"][0]["notes"], [])
+    check("scan: defaults", lone["devices"][0]["properties"]["serial_port"], "/dev/ttyUSB0")
+    far = ScanLine({40: (1, 2, 3)})
+    check("scan: HART 6/7 addresses only with max_address 63",
+        len(module.scan({"max_address": 63, "timeout": 0.01}, line=far)["devices"]), 1)
+    check("scan: max_address is capped at 63", len(far.written), 64)
+    check("scan: silent line", module.scan({"max_address": 2, "timeout": 0.01}, line=ScanLine({}))["devices"], [])
+
+
+def test_scan_main():
+    import io
+    import json as _json
+    import contextlib
+    import Hart as module
+    section("scan main")
+    original = module.scan
+    try:
+        module.scan = lambda config: {"devices": [{"name": config["serial_port"]}]}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = module.scan_main(["Hart", "--scan", '{"serial_port": "/dev/ttyS1"}'])
+        check("scan main: exit code", code, 0)
+        check("scan main: result", _json.loads(out.getvalue().strip()[len(module.SCAN_RESULT_MARKER):]),
+            {"devices": [{"name": "/dev/ttyS1"}]})
+        def missing(config):
+            raise OSError("could not open port /dev/ttyS1")
+        module.scan = missing
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = module.scan_main(["Hart", "--scan", "{}"])
+        result = _json.loads(out.getvalue().strip()[len(module.SCAN_RESULT_MARKER):])
+        check("scan main: failure exit code", code, 1)
+        check("scan main: failure reported", result["error"], "OSError: could not open port /dev/ttyS1")
+    finally:
+        module.scan = original
+
+
 if __name__ == "__main__":
     print("== Hart device server tests ==")
     print()
@@ -763,6 +859,9 @@ if __name__ == "__main__":
     test_string_cast_from_bytes()
     test_bool_cast()
     test_multi_poll()
+    if HAS_HART:
+        test_scan()
+    test_scan_main()
 
     print()
     print("=" * 50)

@@ -2,6 +2,7 @@
 
 import io
 import os
+import sys
 import json
 import time
 import struct
@@ -386,6 +387,123 @@ class Hart(Device, metaclass=DeviceMeta):
         }.get(name, AttrDataFormat.SCALAR)
 
 
+# ───────────── Device Scan ─────────────
+# "Hart --scan '<json>'" looks for field devices instead of running the device server, so scadawire can
+# offer what it finds as devices to create. It prints one line, SCAN_RESULT_MARKER followed by
+# {"devices": [{"name", "properties", "details", "issues", "notes"}], "error"}: "properties" are named
+# like this driver's device properties, so a found device is configured by copying them over. "issues"
+# are what speaks against using a found device, "notes" what has to be done before it works.
+SCAN_RESULT_MARKER = "SCADAWIRE_SCAN_RESULT "
+
+# Short frame, master to slave: the polling address in the low 6 bits of a single address byte, the
+# primary master bit set. Command 0 is the one command a field device answers by its polling address -
+# it is how a master learns the long address everything else is sent to.
+_SHORT_FRAME_REQUEST = 0x02
+_PRIMARY_MASTER = 0x80
+
+
+def _short_frame(polling_address, command_id):
+    body = bytes([_SHORT_FRAME_REQUEST, _PRIMARY_MASTER | (polling_address & 0x3F), command_id, 0x00])
+    checksum = 0
+    for b in body:
+        checksum ^= b
+    return b"\xFF" * 5 + body + bytes([checksum])
+
+
+def _transact(line, frame, timeout):
+    try:
+        line.reset_input_buffer()
+    except Exception:
+        pass
+    line.write(frame)
+    response = b""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        n = line.in_waiting
+        if n > 0:
+            response += line.read(n)
+        elif response:
+            break
+        time.sleep(0.005)
+    return response
+
+
+def scan(config, line=None):
+    """Polls every polling address of the line with command 0, read unique identifier.
+
+    HART 5 devices take polling addresses 0 to 15, HART 6 and 7 ones up to 63 - max_address says how far
+    to look, every address without a device costs the timeout. The line must not be in use by a running
+    device server meanwhile, its traffic would interleave with the scan's.
+    """
+    from hart_protocol import Unpacker
+    from hart_protocol.tools import calculate_long_address
+    serial_port = str(config.get("serial_port") or "/dev/ttyUSB0")
+    baudrate = int(config.get("baudrate") or 1200)
+    parity = str(config.get("parity") or "O")
+    max_address = config.get("max_address")
+    max_address = min(63, max(0, 15 if max_address in (None, "") else int(max_address)))
+    timeout = float(config.get("timeout") or 0.5)
+    ownLine = line is None
+    if ownLine:
+        import serial
+        line = serial.Serial(port=serial_port, baudrate=baudrate, parity=parity, stopbits=1, bytesize=8, timeout=timeout)
+    try:
+        found = []
+        for address in range(0, max_address + 1):
+            raw = _transact(line, _short_frame(address, 0), timeout)
+            if not raw:
+                continue
+            try:
+                reply = next(Unpacker(_BytesBuffer(raw)))
+            except Exception:
+                continue
+            if getattr(reply, "command", None) != 0 or not hasattr(reply, "manufacturer_id"):
+                continue
+            found.append((address, reply))
+        devices = []
+        for address, reply in found:
+            notes = []
+            if len(found) > 1:
+                notes.append("the line carries %d devices and every HART device server opens the serial port "
+                    "of its own, so only one device of this line can run at a time" % len(found))
+            longAddress = calculate_long_address(reply.manufacturer_id, reply.manufacturer_device_type,
+                int(reply.device_id).to_bytes(3, "big"))
+            devices.append({
+                "name": "HART device %d (manufacturer 0x%02x, type 0x%02x) on %s"
+                    % (address, reply.manufacturer_id, reply.manufacturer_device_type, serial_port),
+                "properties": {"serial_port": serial_port, "baudrate": baudrate, "parity": parity, "address": address},
+                "details": {
+                    "polling_address": address,
+                    "manufacturer_id": "0x%02x" % reply.manufacturer_id,
+                    "device_type": "0x%02x" % reply.manufacturer_device_type,
+                    "device_id": reply.device_id,
+                    "long_address": longAddress.hex(),
+                    "universal_revision": reply.universal_command_revision_level,
+                    "device_revision": reply.transmitter_specific_command_revision_level,
+                    "software_revision": reply.software_revision_level,
+                    "hardware_revision": reply.hardware_revision_level,
+                },
+                "issues": [],
+                "notes": notes,
+            })
+        return {"devices": devices}
+    finally:
+        if ownLine:
+            line.close()
+
+
+def scan_main(argv):
+    try:
+        config = json.loads(argv[argv.index("--scan") + 1]) if len(argv) > argv.index("--scan") + 1 else {}
+        result = scan(config)
+    except Exception as e:
+        result = {"devices": [], "error": "%s: %s" % (type(e).__name__, e)}
+    print(SCAN_RESULT_MARKER + json.dumps(result), flush=True)
+    return 1 if result.get("error") else 0
+
+
 if __name__ == "__main__":
+    if "--scan" in sys.argv:
+        sys.exit(scan_main(sys.argv))
     server_name = os.getenv("DEVICE_SERVER_NAME", "Hart")
     run({server_name: Hart})
