@@ -428,6 +428,25 @@ def _transact(line, frame, timeout):
     return response
 
 
+def _open_line(open_fn, serial_port, reset=None):
+    """open_fn(), working around what a pty does when it is set to the settings it already has.
+
+    A pty left at exactly these settings by the last one to open it - the device server of the line,
+    a scan before - answers tcsetattr with EINVAL, and the open fails. Only the settings changing makes
+    it accept them again, so a failed open is retried once behind an open at other settings, as the
+    hart simulator does. A real serial port never does this; every SITL and demo line is a pty.
+    """
+    import termios
+    try:
+        return open_fn()
+    except termios.error:
+        if reset is None:
+            import serial
+            reset = lambda: serial.Serial(port=serial_port, baudrate=9600, parity="N", timeout=0).close()
+        reset()
+        return open_fn()
+
+
 def scan(config, line=None):
     """Polls every polling address of the line with command 0, read unique identifier.
 
@@ -446,7 +465,8 @@ def scan(config, line=None):
     ownLine = line is None
     if ownLine:
         import serial
-        line = serial.Serial(port=serial_port, baudrate=baudrate, parity=parity, stopbits=1, bytesize=8, timeout=timeout)
+        line = _open_line(lambda: serial.Serial(port=serial_port, baudrate=baudrate, parity=parity,
+            stopbits=1, bytesize=8, timeout=timeout), serial_port)
     try:
         found = []
         for address in range(0, max_address + 1):

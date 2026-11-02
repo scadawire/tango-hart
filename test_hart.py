@@ -800,6 +800,24 @@ def test_scan():
     check("scan: silent line", module.scan({"max_address": 2, "timeout": 0.01}, line=ScanLine({}))["devices"], [])
 
 
+def test_scan_reopens_a_pty_that_rejects_its_settings():
+    import termios
+    import Hart as module
+    section("scan: pty")
+    calls = []
+    def opener():
+        calls.append("open")
+        if calls.count("open") == 1:
+            raise termios.error(22, "Invalid argument")
+        return "line"
+    line = module._open_line(opener, "/dev/pts/7", reset=lambda: calls.append("reset"))
+    check("pty: retried once behind a reset", (line, calls), ("line", ["open", "reset", "open"]))
+    def broken():
+        raise termios.error(22, "Invalid argument")
+    check_raises("pty: a second failure is not swallowed", module._open_line, broken, "/dev/pts/7", lambda: None)
+
+
+
 def test_scan_main():
     import io
     import json as _json
@@ -861,6 +879,7 @@ if __name__ == "__main__":
     test_multi_poll()
     if HAS_HART:
         test_scan()
+    test_scan_reopens_a_pty_that_rejects_its_settings()
     test_scan_main()
 
     print()
